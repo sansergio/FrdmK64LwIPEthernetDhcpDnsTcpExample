@@ -186,12 +186,26 @@ void sys_mark_tcpip_thread(void);
 #define LWIP_ICMP 1
 #endif
 
+/* ---------- RAW options ---------- */
+#if !defined LWIP_RAW
+#define LWIP_RAW 1
+#endif
+
 /* ---------- DHCP options ---------- */
 /* Define LWIP_DHCP to 1 if you want DHCP configuration of
    interfaces. DHCP is not implemented in lwIP 0.5.1, however, so
    turning this on does currently not work. */
 #ifndef LWIP_DHCP
 #define LWIP_DHCP 1
+#endif
+
+/* ---------- DNS options ----------- */
+/**
+ * LWIP_DNS==1: Turn on DNS module. UDP must be available for DNS
+ * transport.
+ */
+#if !defined LWIP_DNS || defined __DOXYGEN__
+#define LWIP_DNS 1
 #endif
 
 /* ---------- UDP options ---------- */

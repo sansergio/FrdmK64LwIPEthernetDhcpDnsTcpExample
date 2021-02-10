@@ -10,7 +10,7 @@
 /*******************************************************************************
  * Includes
  ******************************************************************************/
-
+#include "lwip/api.h"
 #include "lwip/opt.h"
 
 #if LWIP_IPV4 && LWIP_DHCP && LWIP_NETCONN
@@ -77,13 +77,16 @@
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
-
+static void tcpexample_thread(void *arg);
 /*******************************************************************************
  * Variables
  ******************************************************************************/
 
 static mdio_handle_t mdioHandle = {.ops = &EXAMPLE_MDIO_OPS};
 static phy_handle_t phyHandle   = {.phyAddr = EXAMPLE_PHY_ADDRESS, .mdioHandle = &mdioHandle, .ops = &EXAMPLE_PHY_OPS};
+static ip_addr_t example_ip_addr;
+
+static sys_sem_t semx;
 
 /*******************************************************************************
  * Code
@@ -100,6 +103,10 @@ static void print_dhcp_state(void *arg)
     struct dhcp *dhcp;
     u8_t dhcp_last_state = DHCP_STATE_OFF;
 
+    if (sys_sem_new(&semx, 0)) {
+    	LWIP_ASSERT("print_dhcp_state(): Semaphore creation failed: print_dhcp", 0);
+    }
+
     while (netif_is_up(netif))
     {
         dhcp = netif_dhcp_data(netif);
@@ -112,7 +119,7 @@ static void print_dhcp_state(void *arg)
         {
             dhcp_last_state = dhcp->state;
 
-            PRINTF(" DHCP state       : ");
+            PRINTF("print_dhcp_state(): DHCP state       : ");
             switch (dhcp_last_state)
             {
                 case DHCP_STATE_OFF:
@@ -157,9 +164,10 @@ static void print_dhcp_state(void *arg)
 
             if (dhcp_last_state == DHCP_STATE_BOUND)
             {
-                PRINTF("\r\n IPv4 Address     : %s\r\n", ipaddr_ntoa(&netif->ip_addr));
-                PRINTF(" IPv4 Subnet mask : %s\r\n", ipaddr_ntoa(&netif->netmask));
-                PRINTF(" IPv4 Gateway     : %s\r\n\r\n", ipaddr_ntoa(&netif->gw));
+                PRINTF("\r\nprint_dhcp_state(): IPv4 Address     : %s\r\n", ipaddr_ntoa(&netif->ip_addr));
+                PRINTF("print_dhcp_state():  IPv4 Subnet mask : %s\r\n", ipaddr_ntoa(&netif->netmask));
+                PRINTF("print_dhcp_state():  IPv4 Gateway     : %s\r\n\r\n", ipaddr_ntoa(&netif->gw));
+                sys_sem_signal(&semx);
             }
         }
 
@@ -209,13 +217,18 @@ int main(void)
 
     netifapi_dhcp_start(&netif);
 
-    PRINTF("\r\n************************************************\r\n");
-    PRINTF(" DHCP example\r\n");
-    PRINTF("************************************************\r\n");
+    PRINTF("\r\nmain():************************************************\r\n");
+    PRINTF("main(): DHCP example\r\n");
+    PRINTF("main():************************************************\r\n");
 
-    if (sys_thread_new("print_dhcp", print_dhcp_state, &netif, PRINT_THREAD_STACKSIZE, PRINT_THREAD_PRIO) == NULL)
+    if (sys_thread_new("print_dhcp", print_dhcp_state, &netif, PRINT_THREAD_STACKSIZE, 4) == NULL)
     {
-        LWIP_ASSERT("stack_init(): Task creation failed.", 0);
+        LWIP_ASSERT("main(): Task creation failed: print_dhcp", 0);
+    }
+
+    if (sys_thread_new("tcpexample_thread", tcpexample_thread, NULL, DEFAULT_THREAD_STACKSIZE, 3) == NULL)
+    {
+        LWIP_ASSERT("main(): Task creation failed: tcpexample_thread", 0);
     }
 
     vTaskStartScheduler();
@@ -223,4 +236,87 @@ int main(void)
     /* Will not get here unless a task calls vTaskEndScheduler ()*/
     return 0;
 }
+
+/*-----------------------------------------------------------------------------------*/
+static void
+tcpexample_thread(void *arg)
+{
+  struct netconn *conn = NULL;
+  err_t err;
+  struct netbuf *buf;
+  void *data;
+  u16_t len;
+  const char* http_request =
+		  "GET / HTTP/1.1\r\n"\
+		  "Host: example.com\r\n"\
+		  "\r\n";
+  char* rcvd;
+  LWIP_UNUSED_ARG(arg);
+
+  // Wait for DHCP to complete
+  PRINTF("tcpexample_thread(): Wait for DHCP provisioning to complete\n");
+  sys_arch_sem_wait(&semx, 0);
+  // get the example.org IP address using DNS
+  PRINTF("tcpexample_thread(): DNS request\n");
+  err = netconn_gethostbyname("example.org", &example_ip_addr);
+  if (err != ERR_OK) {
+	  PRINTF("tcpexample_thread(): ERROR! getting example.org IP address\r\n");
+	  goto __tcp_task_end;
+  }
+  PRINTF("tcpexample_thread(): example.org IP address: %s\r\n\r\n", ipaddr_ntoa(&example_ip_addr));
+
+  /* Create a new connection identifier. */
+  /* Bind connection to well known port number 7. */
+  conn = netconn_new(NETCONN_TCP);
+
+  // Connect with example.org
+  PRINTF("tcpexample_thread(): Connect with example.org\n");
+  err = netconn_connect(conn, &example_ip_addr, 80);
+  if (err != ERR_OK) {
+	  PRINTF("tcpexample_thread(): ERROR! getting example.org IP address\r\n");
+	  goto __tcp_task_end;
+  }
+
+  // Send and HTTP request
+  PRINTF("tcpexample_thread(): Send and HTTP request\n");
+  err = netconn_write(conn, http_request, strlen(http_request), NETCONN_COPY);
+  if (err != ERR_OK) {
+	PRINTF("tcpexample_thread(): netconn_write: error \"%s\"\n", lwip_strerr(err));
+    goto __tcp_task_end;
+  }
+
+  PRINTF("tcpexample_thread(): Reading the response:\n");
+  // Set the receive timeout to 1s
+  netconn_set_recvtimeout(conn, 1000);
+  do {
+	  err = netconn_recv(conn, &buf);
+	  if (err == ERR_OK) {
+		  do {
+		       netbuf_data(buf, &data, &len);
+		       rcvd = (char*)data;
+		       for(int i = 0; i<=len; i++) {
+		    	   PRINTF("%c", *rcvd++);
+		       }
+		  } while (netbuf_next(buf) >= 0);
+		  netbuf_delete(buf);
+	  }
+  }while(err == ERR_OK);
+
+  if (err != ERR_TIMEOUT) {
+	PRINTF("tcpexample_thread(): netconn_recv: error \"%s\"\n", lwip_strerr(err));
+    goto __tcp_task_end;
+  }
+
+  PRINTF("\n");
+
+  PRINTF("tcpexample_thread(): Closing the connection\n");
+__tcp_task_end:
+  if (conn == NULL) {
+      netconn_close(conn);
+      netconn_delete(conn);
+  }
+
+  vTaskDelete(NULL);
+}
+
 #endif
